@@ -492,7 +492,7 @@ const APP = (function() {
     if (data.cobradores && data.cobradores.length) DB.cobradores = data.cobradores;
     if (data.sucursales && data.sucursales.length) DB.sucursales = data.sucursales;
     if (data.plantillas && data.plantillas.length) DB.plantillas = data.plantillas;
-    if (data.usuarios   && data.usuarios.length > DB.usuarios.length) DB.usuarios = data.usuarios;
+    if (data.usuarios   && data.usuarios.length > 0) DB.usuarios = data.usuarios;
     if (data.contactos) { DB_CONTACTOS = data.contactos; guardarDB_CONTACTOS(); }
   }
 
@@ -534,6 +534,14 @@ const APP = (function() {
           return;
         }
         var fbDate = data.savedAt ? new Date(data.savedAt).getTime() : 0;
+        var clearedAt = localStorage.getItem('biletta_cleared');
+        var clearedDate = clearedAt ? new Date(clearedAt).getTime() : 0;
+        // No restaurar datos más viejos que la última limpieza
+        if (fbDate <= clearedDate) {
+          aplicarContactos(DB_CONTACTOS);
+          buildSidebar(); renderDash();
+          return;
+        }
         if (fbDate >= localDate || DB.clientes.length === 0) {
           applyData(data);
           try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch(e) {}
@@ -678,11 +686,21 @@ const APP = (function() {
       if(imp){imp.innerHTML='<div style="background:#E6F1FB;border-radius:8px;padding:11px;color:#1050A0;font-size:13px">⏳ Borrando datos de la nube...</div>';imp.style.display='block';}
       var datosVacios={clientes:[],facturas:[],gestiones:[],cobradores:DB.cobradores,sucursales:DB.sucursales,plantillas:DB.plantillas,usuarios:DB.usuarios,savedAt:new Date().toISOString()};
       function mostrarListo(ok){
-        if(imp){imp.innerHTML='<div style="background:#E1F5EE;border-radius:8px;padding:11px;color:#0A6B42;font-size:13px">'+(ok?'✓ Datos eliminados correctamente.':'✓ Datos locales eliminados.')+'</div>';}
+        if(imp){imp.innerHTML='<div style="background:#E1F5EE;border-radius:8px;padding:11px;color:#0A6B42;font-size:13px">'
+          +(ok?'✓ Datos eliminados correctamente.':'✓ Datos locales eliminados.')+'</div>';}
         var si=document.getElementById('saved-info'); if(si) si.textContent='';
         buildSidebar();
       }
-      mostrarListo(true);
+      // Limpiar Firebase y guardar timestamp
+      var tsCleared = new Date().toISOString();
+      try { localStorage.setItem('biletta_cleared', tsCleared); } catch(e) {}
+      var datosVaciosF = {clientes:[],facturas:[],gestiones:[],savedAt:tsCleared};
+      fetch(FB_URL + '.json', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(datosVaciosF)
+      }).then(function(){ mostrarListo(true); })
+        .catch(function(){ mostrarListo(true); });
     };
     openM('m-del');
   }
@@ -1613,18 +1631,57 @@ const APP = (function() {
     if(v==='sucursal'){if(lbl)lbl.textContent='Sucursal asignada';fSel('mu-cob',DB.sucursales.map(function(s){return {v:s,l:s};}));if(sr)sr.style.display='none';}
     else{if(lbl)lbl.textContent='Cobrador asignado';fSel('mu-cob',DB.cobradores.map(function(c,i){return {v:i,l:c.nombre};}));if(sr)sr.style.display='';}
   }
-  function abrirUsr() { fSel('mu-cob',DB.cobradores.map(function(c,i){return {v:i,l:c.nombre};})); fSel('mu-suc',DB.sucursales.map(function(s){return {v:s,l:s};})); document.getElementById('cob-row').style.display='grid'; openM('m-usr'); }
+  function abrirUsr() {
+    // Llenar selectores
+    fSel('mu-cob', DB.cobradores.map(function(cb,i){ return {v:i, l:cb.nombre}; }));
+    fSel('mu-suc', DB.sucursales.map(function(s){ return {v:s, l:s}; }));
+    // Resetear formulario
+    var fields = ['mu-nom','mu-usr','mu-pass'];
+    fields.forEach(function(id){ var el=document.getElementById(id); if(el) el.value=''; });
+    var rol = document.getElementById('mu-rol');
+    if(rol) rol.value = 'cobrador';
+    // Mostrar fila cobrador por defecto
+    var cobRow = document.getElementById('cob-row');
+    if(cobRow) cobRow.style.display = 'grid';
+    openM('m-usr');
+  }
   function guardarUsr() {
-    const n=document.getElementById('mu-nom').value.trim(), u=document.getElementById('mu-usr').value.trim().toLowerCase(), p=document.getElementById('mu-pass').value, r=document.getElementById('mu-rol').value;
-    if(!n||!u||p.length<4){alert('Completá todos los campos. La contraseña debe tener al menos 4 caracteres.');return;}
-    if(DB.usuarios.some(function(x){return x.usr===u;})){alert('Ese usuario ya existe.');return;}
-    let cid=null, suc='Todas';
-    if(r==='cobrador'){cid=parseInt(document.getElementById('mu-cob').value);suc=DB.cobradores[cid]?DB.cobradores[cid].suc:'Todas';}
-    else if(r==='sucursal'){suc=document.getElementById('mu-cob').value;}
-    DB.usuarios.push({id:DB.usuarios.length+1,usr:u,pwd:p,nombre:n,rol:r,cid,suc,activo:true,ult:'—'});
-    document.getElementById('mu-nom').value='';document.getElementById('mu-usr').value='';document.getElementById('mu-pass').value='';
-    closeM('m-usr'); saveData(); renderAdmin();
-    const ok=document.getElementById('usr-ok');if(ok){ok.style.display='block';setTimeout(function(){ok.style.display='none';},3000);}
+    var n = document.getElementById('mu-nom').value.trim();
+    var u = document.getElementById('mu-usr').value.trim().toLowerCase();
+    var p = document.getElementById('mu-pass').value;
+    var r = document.getElementById('mu-rol').value;
+    if(!n || !u || p.length < 4) {
+      alert('Completá todos los campos. La contraseña debe tener al menos 4 caracteres.');
+      return;
+    }
+    if(DB.usuarios.some(function(x){ return x.usr === u; })) {
+      alert('Ese nombre de usuario ya existe. Elegí otro.');
+      return;
+    }
+    var cid = null, suc = 'Todas';
+    if(r === 'cobrador') {
+      var cobEl = document.getElementById('mu-cob');
+      cid = cobEl ? parseInt(cobEl.value) : 0;
+      suc = DB.cobradores[cid] ? DB.cobradores[cid].suc : 'Todas';
+    } else if(r === 'sucursal') {
+      var sucEl = document.getElementById('mu-suc');
+      suc = sucEl ? sucEl.value : 'CORDOBA';
+    }
+    var nuevoUsr = {
+      id: DB.usuarios.length + 1,
+      usr: u, pwd: p, nombre: n, rol: r,
+      cid: cid, suc: suc, activo: true, ult: '—'
+    };
+    DB.usuarios.push(nuevoUsr);
+    // Limpiar formulario
+    document.getElementById('mu-nom').value = '';
+    document.getElementById('mu-usr').value = '';
+    document.getElementById('mu-pass').value = '';
+    closeM('m-usr');
+    saveData();
+    renderAdmin();
+    var ok = document.getElementById('usr-ok');
+    if(ok) { ok.style.display='block'; setTimeout(function(){ ok.style.display='none'; }, 3000); }
   }
   function confDel(tipo,i) {
     const nombres={cobrador:DB.cobradores[i]?DB.cobradores[i].nombre:'',sucursal:DB.sucursales[i]||'',usuario:DB.usuarios[i]?DB.usuarios[i].usr:''};
